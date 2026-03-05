@@ -105,7 +105,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from .cbam import CBAM
+# CBAM is imported from .conv above; do not re-import from .cbam to avoid overriding with incompatible signature
 
 __all__ = (
     "AIFI",
@@ -125,7 +125,7 @@ __all__ = (
     "SPP",
     "SPPELAN",
     "SPPF",
-    "CBAM",
+
     "A2C2f",
     "AConv",
     "ADown",
