@@ -1716,6 +1716,12 @@ def parse_model(d, ch, verbose=True):
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        elif m is CBAM:
+            # CBAM is channel-preserving: output channels == input channels.
+            # Only pass c1 (input channels) to the constructor; ignore any extra yaml args.
+            c1 = ch[f]
+            c2 = c1
+            args = [c1]
         else:
             c2 = ch[f]
 
