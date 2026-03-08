@@ -105,7 +105,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from .cbam import CBAM  # Full paper-accurate CBAM (overrides lite version from .conv)
+# Full CBAM from .cbam not used; using lite CBAM from .conv (imported above) for faster convergence
 
 __all__ = (
     "AIFI",
