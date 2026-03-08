@@ -1,125 +1,94 @@
-import torch.nn as nn   
+"""Full CBAM (Convolutional Block Attention Module) from the original paper.
+
+Implements the complete CBAM with MLP bottleneck channel attention and dual-pooling
+spatial attention, as described in: https://arxiv.org/abs/1807.06521
+
+This version is adapted for seamless integration with Ultralytics YOLO parse_model,
+which calls CBAM(c1) with only the input channel count.
+"""
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ChannelAttention(nn.Module):
+    """Channel attention module with shared MLP bottleneck (from CBAM paper).
 
-class CBAM(nn.Module):
+    Uses both average-pooled and max-pooled features through a shared two-layer MLP,
+    then combines them with element-wise summation before sigmoid activation.
+    """
 
-    def __init__(self, n_channels_in, reduction_ratio, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.n_channels_in = n_channels_in
-        self.reduction_ratio = reduction_ratio
-        self.kernel_size = kernel_size
+    def __init__(self, channels, reduction_ratio=16):
+        """Initialize channel attention with bottleneck MLP.
 
-        self.channel_attention = ChannelAttention(n_channels_in, reduction_ratio)
-        self.spatial_attention = SpatialAttention(kernel_size)
+        Args:
+            channels (int): Number of input channels.
+            reduction_ratio (int): Reduction ratio for the bottleneck MLP.
+        """
+        super().__init__()
+        mid_channels = max(channels // reduction_ratio, 1)
+        self.shared_mlp = nn.Sequential(
+            nn.Conv2d(channels, mid_channels, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, channels, 1, bias=False),
+        )
 
-    def forward(self, f):
-        chan_att = self.channel_attention(f)
-        # print(chan_att.size())
-        fp = chan_att * f
-        # print(fp.size())
-        spat_att = self.spatial_attention(fp)
-        # print(spat_att.size())
-        fpp = spat_att * fp
-        # print(fpp.size())
-        return fpp
+    def forward(self, x):
+        """Apply channel attention: AvgPool + MaxPool → shared MLP → sigmoid."""
+        avg_out = self.shared_mlp(F.adaptive_avg_pool2d(x, 1))
+        max_out = self.shared_mlp(F.adaptive_max_pool2d(x, 1))
+        return x * torch.sigmoid(avg_out + max_out)
 
 
 class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size):
-        super(SpatialAttention, self).__init__()
-        self.kernel_size = kernel_size
+    """Spatial attention module (from CBAM paper).
 
-        assert kernel_size % 2 == 1, "Odd kernel size required"
-        self.conv = nn.Conv2d(in_channels = 2, out_channels = 1, kernel_size = kernel_size, padding= int((kernel_size-1)/2))
-        # batchnorm
+    Concatenates average-pooled and max-pooled features along channel axis,
+    then applies a convolution to produce a spatial attention map.
+    """
+
+    def __init__(self, kernel_size=7):
+        """Initialize spatial attention with conv layer.
+
+        Args:
+            kernel_size (int): Kernel size for spatial conv (must be odd, typically 7).
+        """
+        super().__init__()
+        assert kernel_size % 2 == 1, "Kernel size must be odd"
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
 
     def forward(self, x):
-        max_pool = self.agg_channel(x, "max")
-        avg_pool = self.agg_channel(x, "avg")
-        pool = torch.cat([max_pool, avg_pool], dim = 1)
-        conv = self.conv(pool)
-        # batchnorm ????????????????????????????????????????????
-        conv = conv.repeat(1,x.size()[1],1,1)
-        att = torch.sigmoid(conv)        
-        return att
+        """Apply spatial attention: channel AvgPool + MaxPool → Conv → sigmoid."""
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out = torch.max(x, dim=1, keepdim=True)[0]
+        attn = torch.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
+        return x * attn
 
-    def agg_channel(self, x, pool = "max"):
-        b,c,h,w = x.size()
-        x = x.view(b, c, h*w)
-        x = x.permute(0,2,1)
-        if pool == "max":
-            x = F.max_pool1d(x,c)
-        elif pool == "avg":
-            x = F.avg_pool1d(x,c)
-        x = x.permute(0,2,1)
-        x = x.view(b,1,h,w)
+
+class CBAM(nn.Module):
+    """Convolutional Block Attention Module (full paper version).
+
+    Sequentially applies channel attention then spatial attention to refine features.
+    Compatible with Ultralytics parse_model: called as CBAM(c1).
+
+    Reference: https://arxiv.org/abs/1807.06521
+    """
+
+    def __init__(self, c1, reduction_ratio=16, kernel_size=7):
+        """Initialize full CBAM module.
+
+        Args:
+            c1 (int): Number of input/output channels (channel-preserving).
+            reduction_ratio (int): Reduction ratio for channel attention MLP bottleneck.
+            kernel_size (int): Kernel size for spatial attention convolution.
+        """
+        super().__init__()
+        self.channel_attention = ChannelAttention(c1, reduction_ratio)
+        self.spatial_attention = SpatialAttention(kernel_size)
+
+    def forward(self, x):
+        """Apply channel attention then spatial attention sequentially."""
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
         return x
-
-
-class ChannelAttention(nn.Module):
-    def __init__(self, n_channels_in, reduction_ratio):
-        super(ChannelAttention, self).__init__()
-        self.n_channels_in = n_channels_in
-        self.reduction_ratio = reduction_ratio
-        self.middle_layer_size = int(self.n_channels_in/ float(self.reduction_ratio))
-
-        self.bottleneck = nn.Sequential(
-            nn.Linear(self.n_channels_in, self.middle_layer_size),
-            nn.ReLU(),
-            nn.Linear(self.middle_layer_size, self.n_channels_in)
-        )
-
-
-    def forward(self, x):
-        kernel = (x.size()[2], x.size()[3])
-        avg_pool = F.avg_pool2d(x, kernel )
-        max_pool = F.max_pool2d(x, kernel)
-
-        
-        avg_pool = avg_pool.view(avg_pool.size()[0], -1)
-        max_pool = max_pool.view(max_pool.size()[0], -1)
-        
-
-        avg_pool_bck = self.bottleneck(avg_pool)
-        max_pool_bck = self.bottleneck(max_pool)
-
-        pool_sum = avg_pool_bck + max_pool_bck
-
-        sig_pool = torch.sigmoid(pool_sum)
-        sig_pool = sig_pool.unsqueeze(2).unsqueeze(3)
-
-        out = sig_pool.repeat(1,1,kernel[0], kernel[1])
-        return out
-
-def main():
-    # ca = CBAM() 
-
-
-    f = torch.FloatTensor([
-        [
-            [[1,1,1,1,1], [1,1,2,1,1], [1,1,1,1,1]],
-            [[2,2,2,2,2], [2,2,3,2,2], [2,2,2,2,2]],
-            [[3,3,3,3,3], [3,3,4,3,3], [3,3,3,3,3]]
-        ]
-    ])
-
-    print(f.size())
-
-    # sa = SpatialAttention(kernel_size = 3)
-    # sa(f)
-    cbam = CBAM(n_channels_in = f.size()[1],reduction_ratio = 2, kernel_size = 3) 
-
-
-    fpp = cbam(f)
-    print(fpp.size())
-    print(fpp)
-    # print(f)
-    # print(fp)
-    
-
-
-if __name__ == "__main__":
-    main()

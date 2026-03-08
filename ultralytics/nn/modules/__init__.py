@@ -105,7 +105,7 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-# CBAM is imported from .conv above; do not re-import from .cbam to avoid overriding with incompatible signature
+from .cbam import CBAM  # Full paper-accurate CBAM (overrides lite version from .conv)
 
 __all__ = (
     "AIFI",
